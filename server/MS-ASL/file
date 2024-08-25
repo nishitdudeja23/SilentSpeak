@@ -1,0 +1,248 @@
+import numpy as np
+import tensorflow as tf
+import cv2
+import mediapipe as mp
+import json
+# Define left and right pose landmarks
+
+LPOSE = [13, 15, 17, 19, 21]  # Indices for left pose landmarks
+RPOSE = [14, 16, 18, 20, 22]  # Indices for right pose landmarks
+
+# Combine them into a single list for pose landmarks
+POSE = LPOSE + RPOSE
+
+X = [f'x_right_hand_{i}' for i in range(21)] + [f'x_left_hand_{i}' for i in range(21)] + [f'x_pose_{i}' for i in POSE]
+Y = [f'y_right_hand_{i}' for i in range(21)] + [f'y_left_hand_{i}' for i in range(21)] + [f'y_pose_{i}' for i in POSE]
+Z = [f'z_right_hand_{i}' for i in range(21)] + [f'z_left_hand_{i}' for i in range(21)] + [f'z_pose_{i}' for i in POSE] 
+FEATURE_COLUMNS = X + Y + Z
+
+# Define indices for X, Y, Z, and other categories
+X_IDX = [i for i, col in enumerate(FEATURE_COLUMNS)  if "x_" in col]
+Y_IDX = [i for i, col in enumerate(FEATURE_COLUMNS)  if "y_" in col]
+Z_IDX = [i for i, col in enumerate(FEATURE_COLUMNS)  if "z_" in col]
+
+RHAND_IDX = [i for i, col in enumerate(FEATURE_COLUMNS)  if "right" in col]
+LHAND_IDX = [i for i, col in enumerate(FEATURE_COLUMNS)  if  "left" in col]
+RPOSE_IDX = [i for i, col in enumerate(FEATURE_COLUMNS)  if  "pose" in col and int(col[-2:]) in RPOSE]
+LPOSE_IDX = [i for i, col in enumerate(FEATURE_COLUMNS)  if  "pose" in col and int(col[-2:]) in LPOSE]
+# Load the character-to-prediction index mapping
+
+with open(r"C:\Users\nishi\Videos\MS-ASL\character_to_prediction_index.json", "r") as f:
+    char_to_num = json.load(f)
+
+# Add special tokens
+pad_token = 'P'
+start_token = '<'
+end_token = '>'
+pad_token_idx = 59
+start_token_idx = 60
+end_token_idx = 61
+
+char_to_num[pad_token] = pad_token_idx
+char_to_num[start_token] = start_token_idx
+char_to_num[end_token] = end_token_idx
+num_to_char = {j: i for i, j in char_to_num.items()}
+
+FRAME_LEN = 128
+mp_hands, mp_face_mesh, mp_pose = mp.solutions.hands, mp.solutions.face_mesh, mp.solutions.pose
+hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1, min_detection_confidence=0.5)
+
+mp_drawing = mp.solutions.drawing_utils
+
+# Define preprocessing functions
+def resize_pad(x):
+     if tf.shape(x)[0] < FRAME_LEN:
+        x = tf.pad(x, ([[0, FRAME_LEN-tf.shape(x)[0]], [0, 0], [0, 0]]))
+     else:
+        x = tf.image.resize(x, (FRAME_LEN, tf.shape(x)[1]))
+     return x
+
+def pre_process(x):
+
+    x = np.array(x, dtype=np.float32)  # Ensure x is a float32 array
+    
+    # Convert to TensorFlow tensor
+    x = tf.convert_to_tensor(x, dtype=tf.float32)
+    
+    # Print tensor shape and indices for debugging
+    print(f"x shape before processing: {x.shape}")
+    
+    # Ensure indices are within the valid range
+    num_features = x.shape[1]
+    print(f"Number of features in x: {num_features}")
+
+    if num_features < len(FEATURE_COLUMNS):
+        print("Warning: The number of features in the input data is less than expected.")
+        x = tf.pad(x, [[0, 0], [0, len(FEATURE_COLUMNS) - num_features]])
+        print(f"x shape after padding: {x.shape}")
+  
+    if not all(idx < num_features for idx in RHAND_IDX + LHAND_IDX + RPOSE_IDX + LPOSE_IDX):
+        raise ValueError("One or more indices are out of bounds.")
+
+    rhand = tf.gather(x, RHAND_IDX, axis=1)
+    lhand = tf.gather(x, LHAND_IDX, axis=1)
+    rpose = tf.gather(x, RPOSE_IDX, axis=1)
+    lpose = tf.gather(x, LPOSE_IDX, axis=1)
+    
+    rnan_idx = tf.reduce_any(tf.math.is_nan(rhand), axis=1)
+    lnan_idx = tf.reduce_any(tf.math.is_nan(lhand), axis=1)
+    
+    rnans = tf.math.count_nonzero(rnan_idx)
+    lnans = tf.math.count_nonzero(lnan_idx)
+    
+    # For dominant hand
+    if rnans > lnans:
+        hand, pose = lhand, lpose
+        hand_x, hand_y, hand_z = hand[:, :21], hand[:, 21:42], hand[:, 42:]
+        hand = tf.concat([1-hand_x, hand_y, hand_z], axis=1)
+        pose_x, pose_y, pose_z = pose[:, :len(LPOSE_IDX)//3], pose[:, len(LPOSE_IDX)//3:2*len(LPOSE_IDX)//3], pose[:, 2*len(LPOSE_IDX)//3:]
+        pose = tf.concat([1-pose_x, pose_y, pose_z], axis=1)
+    else:
+        hand = rhand
+        pose = rpose
+    
+    hand_x, hand_y, hand_z = hand[:, :21], hand[:, 21:42], hand[:, 42:]
+    hand = tf.concat([hand_x[..., tf.newaxis], hand_y[..., tf.newaxis], hand_z[..., tf.newaxis]], axis=-1)
+    hand = (hand - tf.math.reduce_mean(hand, axis=1, keepdims=True)) / tf.math.reduce_std(hand, axis=1, keepdims=True)
+
+    pose_x, pose_y, pose_z = pose[:, :len(LPOSE_IDX)//3], pose[:, len(LPOSE_IDX)//3:2*len(LPOSE_IDX)//3], pose[:, 2*len(LPOSE_IDX)//3:]
+    pose = tf.concat([pose_x[..., tf.newaxis], pose_y[..., tf.newaxis], pose_z[..., tf.newaxis]], axis=-1)
+    
+    x = tf.concat([hand, pose], axis=1)
+    x = resize_pad(x)
+    x = tf.where(tf.math.is_nan(x), tf.zeros_like(x), x)
+    x = tf.reshape(x, (FRAME_LEN, len(LHAND_IDX) + len(LPOSE_IDX)))
+    return x
+
+
+#  Load the TFLite model and allocate tensors
+interpreter = tf.lite.Interpreter(model_path=r"C:\Users\nishi\Videos\MS-ASL\model.tflite")
+interpreter.allocate_tensors()
+
+# Get input and output tensors
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+
+def prepare_input(landmarks):
+    """
+    Prepare the landmarks data for input to the model.
+    - Convert landmarks data to numpy array.
+    - Apply preprocessing to the landmarks.
+    
+    Args:
+    - landmarks (numpy.ndarray): The raw landmarks data, shape (num_landmarks, 3).
+    
+    Returns:
+    - numpy.ndarray: The processed input data, ready for model inference.
+    """
+    # Convert landmarks data to numpy array
+    landmarks = np.array(landmarks, dtype=np.float32)
+    
+    # Preprocess the landmarks
+    preprocessed_data = pre_process(landmarks)
+    
+    # Flatten the landmarks array if needed to match the input shape
+    flattened_data = preprocessed_data.flatten()
+    
+    # Add batch dimension (batch_size, feature_size)
+    input_data = np.expand_dims(flattened_data, axis=0)
+    
+    return input_data
+
+def predict_real_time(landmark_frame):
+    """
+    Perform real-time prediction on the given landmark frame.
+    
+    Args:
+    - landmark_frame (numpy.ndarray): A single frame of landmark data, shape (num_landmarks, 3).
+    
+    Returns:
+    - str: The predicted text (ASL gesture).
+    """
+    # Prepare the input data
+    input_data = prepare_input(landmark_frame)
+    
+    # Ensure the input data is of type FLOAT32
+    input_data = input_data.astype(np.float32)
+    
+    # Set the tensor to point to the input data to be inferred
+    interpreter.set_tensor(input_details[0]['index'], input_data)
+    
+    # Run inference
+    interpreter.invoke()
+    
+    # Get the output data
+    output_data = interpreter.get_tensor(output_details[0]['index'])
+    
+    # Decode the output to text
+    predicted_sequence = np.argmax(output_data, axis=-1)[0]  # Batch size 1, take the first element
+    predicted_text = "".join([num_to_char[idx] for idx in predicted_sequence if idx != pad_token_idx])
+    
+    return predicted_text
+
+# Initialize MediaPipe Hands and Face modules
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1, min_detection_confidence=0.5)
+mp_drawing = mp.solutions.drawing_utils
+
+def get_landmarks_from_video_frame(image):
+    """
+    Processes a given video frame to detect hand and face landmarks,
+    and returns the landmarks as a numpy array.
+
+    Args:
+    - frame (numpy.ndarray): The video frame from which landmarks are to be extracted.
+
+    Returns:
+    - numpy.ndarray: The detected landmarks, shape (num_landmarks, 3) for landmarks with (x, y, z) coordinates.
+                     Returns None if no landmarks are detected.
+    """
+    # Convert the BGR image to RGB
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    hand_results, pose_results = hands.process(image),pose.process(image)
+
+    if not hand_results.multi_hand_landmarks or not pose_results.pose_landmarks:
+        return None
+
+    right_hand = np.array([[landmark.x, landmark.y, landmark.z] for landmark in hand_results.multi_hand_landmarks[0].landmark]) if hand_results.multi_hand_landmarks else np.zeros((21, 3))
+    
+    pose = np.array([[landmark.x, landmark.y, landmark.z] for i, landmark in enumerate(pose_results.pose_landmarks.landmark) if i in POSE]) if pose_results.pose_landmarks else np.zeros((len(POSE), 3))
+
+    landmarks = np.concatenate([right_hand.flatten(), pose.flatten()])[:len(FEATURE_COLUMNS)]
+    if landmarks.size < len(FEATURE_COLUMNS):
+        padding = np.zeros(len(FEATURE_COLUMNS) - landmarks.size)
+        landmarks = np.concatenate([landmarks, padding])
+    return landmarks
+    
+    return None
+
+# Real-time video processing and prediction
+# Real-time video processing and prediction
+cap = cv2.VideoCapture(0)  # Use 0 for the default camera
+
+while cap.isOpened():
+    ret, frame = cap.read()  # 'ret' is a boolean indicating if the frame was successfully captured
+    
+    if not ret:
+        print("Failed to capture image")
+        break
+
+    # Process the frame to extract landmarks
+    landmarks = get_landmarks_from_video_frame(frame)
+
+    if landmarks is not None:
+        # Perform real-time prediction using the extracted landmarks
+        predicted_text = predict_real_time(landmarks)
+        
+        # Display the prediction on the frame
+        cv2.putText(frame, predicted_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
+
+    # Show the frame with predictions
+    cv2.imshow('ASL Real-Time Prediction', frame)
+
+    # Exit loop if 'q' is pressed
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()

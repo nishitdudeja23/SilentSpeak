@@ -1,0 +1,72 @@
+.call-window {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    opacity: 0;
+    z-index: -1;
+    @include transition(opacity 0.5s);
+    @include bg-gradient(top, #074055 0%, #030D10 100%);
+    
+    &.active {
+        opacity: 1;
+        z-index: auto;
+        
+        .video-control {
+            z-index: auto;
+            @include animation(in-fadeout 3s ease);
+        }
+    }
+    
+    .video-control {
+        position: absolute;
+        bottom: 20px;
+        height: 72px;
+        width: 100%;
+        text-align: center;
+        opacity: 0;
+        z-index: -1;
+        @include transition(opacity 0.5s);
+        
+        &:hover {
+            opacity: 1;
+        }
+    }
+    
+    video {
+        position: absolute;
+    }
+    
+    #localVideo {
+        bottom: 0;
+        right: 0;
+        width: 20%;
+        height: 20%;
+    }
+    
+    #peerVideo {
+        width: 100%;
+        height: 100%;
+    }
+
+    .captions {
+        position: absolute;
+        top: 10px; // Adjust as needed to position above the video
+        left: 50%;
+        transform: translateX(-50%);
+        background-color: rgba(0, 0, 0, 0.5);
+        color: #fff;
+        padding: 10px;
+        border-radius: 5px;
+        font-size: 16px;
+        text-align: center;
+        z-index: 2; // Ensure it's above the video
+    }
+}
+
+@include keyframes(in-fadeout) {
+    0% {opacity: 1}
+    75% {opacity: 1}
+    100% {opacity: 0}
+}
